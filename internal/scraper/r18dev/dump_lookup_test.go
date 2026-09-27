@@ -14,12 +14,17 @@ import (
 // tests exercise the degraded-dump path. MatchByDisplayID returns matches
 // when set (candidate-resolution tests), otherwise mirrors dvdToContent or
 // reports a miss; matchErr overrides to simulate a degraded candidate lookup.
+// LookupMovieByContentID serves contentMovies (keyed by content_id) when set,
+// otherwise reports a miss — so candidate tests without contentMovies keep
+// exercising the HTTP candidate-fetch path.
 type stubDumpLookup struct {
 	dvdToContent      map[string]string
 	lookupMovieResult *models.DumpMovie
 	lookupErr         error // when set, every lookup returns this error
 	matches           []models.DumpMatch
 	matchErr          error
+	contentMovies     map[string]*models.DumpMovie
+	contentMovieErr   error // when set, LookupMovieByContentID returns this error
 }
 
 func (s *stubDumpLookup) LookupByDVDID(ctx context.Context, dvdID string) (string, error) {
@@ -77,6 +82,19 @@ func (s *stubDumpLookup) LookupMovie(ctx context.Context, dvdID string) (*models
 		return nil, models.ErrDumpMiss
 	}
 	return &models.DumpMovie{ContentID: cid, DVDID: dvdID}, nil
+}
+
+func (s *stubDumpLookup) LookupMovieByContentID(ctx context.Context, contentID string) (*models.DumpMovie, error) {
+	if s.contentMovieErr != nil {
+		return nil, s.contentMovieErr
+	}
+	if s.lookupErr != nil {
+		return nil, s.lookupErr
+	}
+	if m, ok := s.contentMovies[contentID]; ok {
+		return m, nil
+	}
+	return nil, models.ErrDumpMiss
 }
 
 // TestResolveURL_PureHTTPNoDumpConsult verifies that ResolveURL no longer

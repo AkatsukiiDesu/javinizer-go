@@ -135,6 +135,14 @@ type R18DevDumpLookup interface {
 	// API call at all. Returns (nil, ErrDumpMiss) on a miss.
 	LookupMovie(ctx context.Context, dvdID string) (*DumpMovie, error)
 
+	// LookupMovieByContentID resolves a DMM content_id to a fully-populated
+	// DumpMovie (same shape as LookupMovie). It serves candidate-only dump
+	// rows — rows reachable via MatchByDisplayID but not via a dvd_id_norm
+	// hit — so the scraper can build a zero-HTTP result from the dump even
+	// when the row has no dvd_id or title_en. Returns (nil, ErrDumpMiss) on
+	// a miss.
+	LookupMovieByContentID(ctx context.Context, contentID string) (*DumpMovie, error)
+
 	// Stats reports metadata about the cached dump for diagnostics and the
 	// `javinizer dump status` command.
 	Stats(ctx context.Context) (DumpStats, error)

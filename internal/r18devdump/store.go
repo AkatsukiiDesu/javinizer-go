@@ -210,7 +210,27 @@ func (s *Store) LookupMovie(ctx context.Context, dvdID string) (*models.DumpMovi
 	if norm == "" {
 		return nil, models.ErrDumpMiss
 	}
+	return s.loadMovie(ctx, "dvd_id_norm = ?", norm, dvdID)
+}
 
+// LookupMovieByContentID resolves a DMM content_id to a fully-populated
+// DumpMovie with all related entities joined. It serves candidate-only dump
+// rows (reachable via MatchByDisplayID but not via a dvd_id_norm hit) so the
+// scraper can build a zero-HTTP result from the dump even when the row has no
+// dvd_id or title_en. Returns models.ErrDumpMiss on a miss; any other wrapped
+// error indicates a degraded dump the caller should log before falling back to
+// HTTP.
+func (s *Store) LookupMovieByContentID(ctx context.Context, contentID string) (*models.DumpMovie, error) {
+	if s == nil || contentID == "" {
+		return nil, models.ErrDumpMiss
+	}
+	return s.loadMovie(ctx, "content_id = ?", strings.ToLower(contentID), contentID)
+}
+
+// loadMovie runs the core videos-row query for the given WHERE clause and
+// argument, then joins the related entities. Shared by LookupMovie and
+// LookupMovieByContentID. label is used only in error messages.
+func (s *Store) loadMovie(ctx context.Context, whereClause, arg, label string) (*models.DumpMovie, error) {
 	var m models.DumpMovie
 	var makerID, labelID, seriesID, dvdIDCol sql.NullString
 	// All text columns are nullable in the dump (encoded as \N -> NULL on
@@ -230,7 +250,7 @@ func (s *Store) LookupMovie(ctx context.Context, dvdID string) (*models.DumpMovi
 		gallery_full_first, gallery_full_last,
 		gallery_thumb_first, gallery_thumb_last,
 		site_id, service_code
-		FROM videos WHERE dvd_id_norm = ? ORDER BY content_id LIMIT 1`, norm,
+		FROM videos WHERE `+whereClause+` ORDER BY content_id LIMIT 1`, arg,
 	).Scan(
 		&m.ContentID, &dvdIDCol, &titleEn, &titleJa, &commentEn, &commentJa,
 		&runtime, &releaseDate, &sampleURL,
@@ -244,7 +264,7 @@ func (s *Store) LookupMovie(ctx context.Context, dvdID string) (*models.DumpMovi
 		return nil, models.ErrDumpMiss
 	}
 	if err != nil {
-		return nil, fmt.Errorf("dump lookup movie %q: %w", dvdID, err)
+		return nil, fmt.Errorf("dump lookup movie %q: %w", label, err)
 	}
 
 	m.DVDID = dvdIDCol.String

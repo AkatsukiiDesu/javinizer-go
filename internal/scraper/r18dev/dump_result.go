@@ -255,12 +255,13 @@ func (s *scraper) resolveDumpMediaURLs(d *models.DumpMovie, result *models.Scrap
 
 // searchFromDump is the dump fast path for Search. On a dvd_id_norm hit it
 // returns a complete ScraperResult with zero HTTP. On a miss it expands the ID
-// into ordered content_id candidates (MatchByDisplayID) so Search can fetch
-// each combined= URL with content_id validation and per-candidate fallthrough
-// instead of running the multi-probe HTTP resolver — one request on the happy
-// path. The
-// candidate-hit dump row is never used as the metadata source — rows reachable
-// only via candidates have no dvd_id upstream and typically no title_en.
+// into ordered content_id candidates (MatchByDisplayID) and loads each
+// candidate's full dump row (LookupMovieByContentID); the first row that
+// exists in the dump is returned as a zero-HTTP ScraperResult even when its
+// dvd_id or title_en is missing — downstream translation fills the title.
+// Only when no candidate row exists in the dump does it return the candidate
+// list so Search can fetch each combined= URL with content_id validation and
+// per-candidate fallthrough instead of running the multi-probe HTTP resolver.
 //
 // A genuine miss from either lookup (models.ErrDumpMiss, which includes
 // ErrDumpNoDVDID) is logged at debug; a real database error is logged at warn
@@ -268,11 +269,12 @@ func (s *scraper) resolveDumpMediaURLs(d *models.DumpMovie, result *models.Scrap
 // no signal. Context cancellation is logged at debug and skips candidate
 // expansion entirely so a cancelled scrape stops immediately.
 //
-// Returns (result, candidates): a nil result with non-empty candidates means
-// the dump resolved candidate content_ids (in HTTP-resolver variation order,
-// so the dump never resolves a different product than HTTP would); Search
-// fetches their combined= URLs in order with content_id validation. Both nil
-// means the caller must fall back to the live HTTP URL resolver.
+// Returns (result, candidates): a non-nil result means the dump fully resolved
+// the ID (zero HTTP). A nil result with non-empty candidates means no dump row
+// exists for any candidate (in HTTP-resolver variation order, so the dump
+// never resolves a different product than HTTP would); Search fetches their
+// combined= URLs in order with content_id validation. Both nil means the
+// caller must fall back to the live HTTP URL resolver.
 func (s *scraper) searchFromDump(ctx context.Context, id string) (*models.ScraperResult, []models.DumpMatch) {
 	if s.dumpLookup == nil {
 		return nil, nil
@@ -332,7 +334,29 @@ func (s *scraper) searchFromDump(ctx context.Context, id string) (*models.Scrape
 			logging.Debugf("R18: dump candidates for %s are not a canonical prefix, falling back to HTTP", id)
 			return nil, nil
 		}
-		logging.Debugf("R18: dump candidates for %s -> %s (+%d more)", id, candidates[0].ContentID, len(candidates)-1)
+		// Zero-HTTP candidate path: build the result from the first candidate
+		// row that exists in the dump, even when its dvd_id or title_en is
+		// missing (downstream translation fills the title). A genuine miss on
+		// a candidate simply moves to the next one; a real database error
+		// degrades to the HTTP candidate fetch so a corrupt dump never blocks
+		// resolution.
+		for _, c := range candidates {
+			movie, mErr := s.dumpLookup.LookupMovieByContentID(ctx, c.ContentID)
+			switch {
+			case mErr == nil:
+				logging.Debugf("R18: dump candidate row resolved %s -> %s (zero HTTP)", id, c.ContentID)
+				return s.resultFromDump(movie), nil
+			case errors.Is(mErr, models.ErrDumpMiss):
+				// row absent from the dump; try the next candidate
+			case errors.Is(mErr, context.Canceled), errors.Is(mErr, context.DeadlineExceeded):
+				logging.Debugf("R18: dump candidate movie lookup cancelled for %s: %v", id, mErr)
+				return nil, nil
+			default:
+				logging.Warnf("R18: dump candidate movie lookup error for %s, falling back to HTTP: %v", id, mErr)
+				return nil, candidates
+			}
+		}
+		logging.Debugf("R18: dump candidates for %s have no full rows, falling back to HTTP fetch", id)
 		return nil, candidates
 	}
 	logging.Debugf("R18: dump lookup resolved %s -> full metadata (zero HTTP)", id)

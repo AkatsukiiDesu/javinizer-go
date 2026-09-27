@@ -389,3 +389,97 @@ func TestSearchFromDump_CandidateLookupErrorFallsBack(t *testing.T) {
 	assert.Error(t, err)
 	assert.Greater(t, rt.count(), 0)
 }
+
+// TestSearchFromDump_CandidateRowZeroHTTP covers the zero-HTTP candidate path:
+// when a candidate's full dump row exists (LookupMovieByContentID hits), the
+// result is built from the dump row with no r18.dev API request — even when
+// the row has no dvd_id or title_en (downstream translation fills the title).
+func TestSearchFromDump_CandidateRowZeroHTTP(t *testing.T) {
+	dump := &stubDumpLookup{
+		matches: []models.DumpMatch{{ContentID: "lulu00441", ServiceCode: "digital"}},
+		contentMovies: map[string]*models.DumpMovie{
+			"lulu00441": {
+				ContentID:   "lulu00441",
+				TitleJa:     "同居することになった上京デカ尻女友達",
+				ReleaseDate: "2026-07-03",
+				Runtime:     160,
+			},
+		},
+	}
+	tr := &candidateAPITransport{body: candidateCombinedJSON}
+	s := newCandidateScraper(dump, tr)
+
+	result, err := s.Search(context.Background(), "LULU-441")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 0, tr.count(), "candidate dump row must be served with zero HTTP")
+	assert.Equal(t, "lulu00441", result.ContentID)
+	assert.Equal(t, "LULU-441", result.ID, "missing dvd_id falls back to contentIDToID")
+	assert.Equal(t, "r18dev", result.Source)
+}
+
+// TestSearchFromDump_CandidateRowMissFallsBackToHTTP: when no candidate row
+// exists in the dump (LookupMovieByContentID misses for all), the candidate
+// list is returned and Search fetches the combined= URLs over HTTP.
+func TestSearchFromDump_CandidateRowMissFallsBackToHTTP(t *testing.T) {
+	dump := &stubDumpLookup{
+		matches: []models.DumpMatch{{ContentID: "lulu00441", ServiceCode: "digital"}},
+		// no contentMovies -> LookupMovieByContentID misses
+	}
+	tr := &candidateAPITransport{body: candidateCombinedJSON}
+	s := newCandidateScraper(dump, tr)
+
+	result, err := s.Search(context.Background(), "LULU-441")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, tr.count(), "absent dump row must fall back to the HTTP candidate fetch")
+	assert.Equal(t, "I Ended Up Living With My Big-assed Female Friend", result.Title)
+}
+
+// TestSearchFromDump_CandidateRowErrorFallsBackToHTTP: a real database error
+// from LookupMovieByContentID degrades to the HTTP candidate fetch so a
+// corrupt dump never blocks resolution.
+func TestSearchFromDump_CandidateRowErrorFallsBackToHTTP(t *testing.T) {
+	dump := &stubDumpLookup{
+		matches:         []models.DumpMatch{{ContentID: "lulu00441", ServiceCode: "digital"}},
+		contentMovieErr: errors.New("simulated dump read failure"),
+	}
+	tr := &candidateAPITransport{body: candidateCombinedJSON}
+	s := newCandidateScraper(dump, tr)
+
+	result, err := s.Search(context.Background(), "LULU-441")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, tr.count(), "degraded dump row lookup must fall back to HTTP")
+	assert.Equal(t, "I Ended Up Living With My Big-assed Female Friend", result.Title)
+}
+
+// TestSearchFromDump_CandidateRowFirstMissSecondHit: a genuine miss on the
+// first candidate moves to the next candidate, whose dump row is served with
+// zero HTTP.
+func TestSearchFromDump_CandidateRowFirstMissSecondHit(t *testing.T) {
+	dump := &stubDumpLookup{
+		matches: []models.DumpMatch{
+			{ContentID: "lulu00441", ServiceCode: "digital"},
+			{ContentID: "lulu441", ServiceCode: "mono"},
+		},
+		contentMovies: map[string]*models.DumpMovie{
+			"lulu441": {
+				ContentID:   "lulu441",
+				DVDID:       "LULU-441",
+				TitleEn:     "Mono Edition Accepted",
+				ReleaseDate: "2026-07-07",
+				Runtime:     160,
+			},
+		},
+	}
+	tr := &candidateAPITransport{body: candidateCombinedJSON}
+	s := newCandidateScraper(dump, tr)
+
+	result, err := s.Search(context.Background(), "LULU-441")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 0, tr.count(), "second candidate dump row must be served with zero HTTP")
+	assert.Equal(t, "lulu441", result.ContentID)
+	assert.Equal(t, "Mono Edition Accepted", result.Title)
+}
